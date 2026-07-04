@@ -1,0 +1,27 @@
+{
+  "name": "tvtime-to-simkl-import-file-convertor",
+  "version": "1.0.0",
+  "description": "Convert TV Time GDPR export zips into Simkl JSON import backups with optional SIMKL ID review.",
+  "main": "index.js",
+  "type": "commonjs",
+  "bin": {
+    "tvtime-to-simkl-import-file-convertor": "./index.js"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "web": "node server.js",
+    "convert": "node index.js",
+    "repair:ids": "node scripts/repair-simkl-id-keys.js",
+    "help": "node index.js --help"
+  },
+  "keywords": [
+    "tvtime",
+    "simkl",
+    "import",
+    "converter"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "mongodb": "^6.21.0"
+  }
+}

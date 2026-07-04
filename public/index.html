@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TV Time -> SIMKL</title>
+  <link rel="stylesheet" href="/assets/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <h1>TV Time -> SIMKL</h1>
+      <p>JSON converter with SIMKL ID review</p>
+    </div>
+    <button class="theme-toggle" type="button" id="themeToggle" aria-label="Toggle dark mode" title="Toggle dark mode">
+      <span id="themeToggleIcon">Dark</span>
+    </button>
+    <div class="topbar-meta" id="sessionMeta">No session</div>
+  </header>
+
+  <main>
+    <section class="panel upload-panel" id="uploadPanel">
+      <form id="uploadForm">
+        <div class="form-grid">
+          <label class="field">
+            <span>TV Time export ZIP</span>
+            <input type="file" id="zipInput" name="zip" accept=".zip" required>
+          </label>
+        </div>
+        <p class="env-note">The SIMKL API uses the `SIMKL_CLIENT_ID` configured in the `.env` file.</p>
+
+        <div class="toggles">
+          <label><input type="checkbox" id="includePlanToWatch" checked> Plan to watch</label>
+          <label><input type="checkbox" id="includeRewatches" checked> Rewatches</label>
+        </div>
+
+        <div class="actions">
+          <button class="primary" type="submit">
+            <span class="icon">&#8613;</span>
+            Process ZIP
+          </button>
+        </div>
+      </form>
+
+      <form class="restore-session" id="restoreForm">
+        <label class="field">
+          <span>Resume session</span>
+          <input type="text" id="restoreSessionId" autocomplete="off" placeholder="paste session ID">
+        </label>
+        <button type="submit">Open session</button>
+      </form>
+
+      <div class="session-resume-bar upload-session-bar hidden" id="activeSessionBar">
+        <strong>Save this session ID</strong>
+        <p>You can close this page and come back later with this ID while the server keeps running.</p>
+        <code id="activeSessionIdText"></code>
+        <button type="button" id="copyActiveSessionButton">Copy</button>
+      </div>
+
+      <div class="progress-wrap hidden" id="progressWrap">
+        <div class="progress-line">
+          <strong id="progressPhase">Preparing</strong>
+          <span id="progressNumbers">0%</span>
+        </div>
+        <div class="progress-bar"><div id="progressBar"></div></div>
+        <div class="progress-details">
+          <span id="elapsedText">Elapsed 00:00:00</span>
+          <span id="etaText">Remaining --:--:--</span>
+          <span id="remainingText">Items left 0</span>
+        </div>
+      </div>
+    </section>
+
+    <section class="review hidden" id="reviewPanel">
+      <div class="session-resume-bar">
+        <strong>Save this session ID</strong>
+        <p>Use it to come back later without starting over.</p>
+        <code id="sessionIdText"></code>
+        <button type="button" id="copySessionButton">Copy</button>
+      </div>
+      <div class="simkl-id-help">
+        <strong>How to find a SIMKL ID</strong>
+        <p>
+          Open SIMKL, search for the TV show, movie, or anime, and open its page. The SIMKL ID is the number in the URL after
+          <code>/tv/</code>, <code>/anime/</code>, <code>/movie/</code>, or <code>/movies/</code>. Paste only that number in the SIMKL ID field.
+        </p>
+        <p>
+          SIMKL search is not always great. You can also search IMDb, copy the IMDb ID that starts with <code>tt</code>, and paste it into SIMKL search.
+          SIMKL should open the matching page. Then copy the numeric SIMKL ID from that SIMKL page URL. Do not paste the IMDb ID into the SIMKL ID field.
+        </p>
+      </div>
+
+      <div class="summary-strip" id="summaryStrip"></div>
+
+      <div class="toolbar">
+        <div class="filters">
+          <button class="chip active" type="button" data-filter="all">All</button>
+          <button class="chip" type="button" data-filter="found">Found</button>
+          <button class="chip" type="button" data-filter="pending">Changed</button>
+          <button class="chip" type="button" data-filter="not_found">Not found</button>
+        </div>
+        <div class="export-options" aria-label="Types to include in the ZIP">
+          <span>Export</span>
+          <label><input type="checkbox" id="exportTv" checked> TV Shows</label>
+          <label><input type="checkbox" id="exportMovies" checked> Movies</label>
+          <label><input type="checkbox" id="exportAnime" checked> Anime</label>
+        </div>
+        <label class="search">
+          <span>Search</span>
+          <input type="search" id="searchInput" placeholder="title or ID">
+        </label>
+        <div class="toolbar-actions">
+          <button type="button" id="validateButton">
+            <span class="icon">&#8635;</span>
+            Validate changed
+          </button>
+          <button type="button" id="saveDbButton">
+            Save IDs to database
+          </button>
+          <button class="primary" type="button" id="downloadButton">
+            <span class="icon">&#8595;</span>
+            Generate ZIP
+          </button>
+        </div>
+      </div>
+
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Status</th>
+              <th>Type</th>
+              <th>TV Time title</th>
+              <th>SIMKL ID</th>
+              <th>SIMKL title</th>
+              <th>Data</th>
+            </tr>
+          </thead>
+          <tbody id="recordsBody"></tbody>
+        </table>
+      </div>
+
+      <section class="conversion-issues" id="conversionIssuesPanel">
+        <div class="conversion-issues-header">
+          <div>
+            <strong>TV Time rows skipped during conversion</strong>
+            <p>
+              These rows did not reach the review table because the TV Time export data was incomplete, invalid, or not usable for the SIMKL backup format.
+            </p>
+          </div>
+          <span id="conversionIssuesSummary">0 skipped rows</span>
+        </div>
+        <div class="issues-table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Source</th>
+                <th>Row</th>
+                <th>Type</th>
+                <th>TV Time data</th>
+                <th>Reason</th>
+                <th>Suggested action</th>
+              </tr>
+            </thead>
+            <tbody id="conversionIssuesBody"></tbody>
+          </table>
+        </div>
+      </section>
+    </section>
+  </main>
+
+  <div class="toast hidden" id="toast"></div>
+
+  <div class="blocking-overlay hidden" id="blockingOverlay">
+    <div class="blocking-panel">
+      <strong id="blockingTitle">Working</strong>
+      <p id="blockingPhase">Preparing...</p>
+      <div class="progress-bar"><div id="blockingBar"></div></div>
+      <div class="progress-details">
+        <span id="blockingElapsed">Elapsed 00:00:00</span>
+        <span id="blockingEta">Remaining --:--:--</span>
+        <span id="blockingRemaining">Items left 0</span>
+      </div>
+    </div>
+  </div>
+
+  <script src="/assets/app.js"></script>
+</body>
+</html>
