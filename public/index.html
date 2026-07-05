@@ -26,6 +26,27 @@
             <span>TV Time export ZIP</span>
             <input type="file" id="zipInput" name="zip" accept=".zip" required>
           </label>
+          <label class="field">
+            <span>TV Time Out by Refract ZIP</span>
+            <input type="file" id="tvTimeOutZipInput" name="tvTimeOutZip" accept=".zip">
+          </label>
+        </div>
+        <div class="upload-help">
+          <div>
+            <strong>Required TV Time GDPR ZIP</strong>
+            <p>
+              Get it from <a href="https://gdpr.tvtime.com/gdpr/self-service" target="_blank" rel="noreferrer">TV Time GDPR self-service</a>.
+              Log in with your TV Time account and request the export. It can take several hours to become ready, and you can leave that page while TV Time prepares it.
+            </p>
+          </div>
+          <div>
+            <strong>Optional IMDb/TVDB helper ZIP</strong>
+            <p>
+              Use <a href="https://chromewebstore.google.com/detail/tv-time-out-by-refract/pmejpdpjbkjklfceogdkolmgclldogbi" target="_blank" rel="noreferrer">TV Time Out by Refract</a>.
+              This ZIP is optional, but strongly recommended because it greatly improves data quality.
+              In the extension, select <strong>Both</strong> as the format and enable <strong>Bundle as ZIP</strong> so JSON and CSV files are included.
+            </p>
+          </div>
         </div>
         <p class="env-note">The SIMKL API uses the `SIMKL_CLIENT_ID` configured in the `.env` file.</p>
 
@@ -132,6 +153,8 @@
               <th>Type</th>
               <th>TV Time title</th>
               <th>SIMKL ID</th>
+              <th>IMDb ID</th>
+              <th>TVDB ID</th>
               <th>SIMKL title</th>
               <th>Data</th>
             </tr>

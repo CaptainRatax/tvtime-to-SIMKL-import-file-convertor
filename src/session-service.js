@@ -11,6 +11,7 @@ const {
   makeTimestamp,
 } = require('./core');
 const { SimklClient, normalizeTitle } = require('./simkl-api');
+const { parseTvTimeOutZip, mappingKey } = require('./tv-time-out');
 
 const DEFAULT_CONVERT_OPTIONS = {
   includePlanToWatch: true,
@@ -37,6 +38,20 @@ async function createSessionFromZip(zipBuffer, options) {
 
   const records = extractMediaRecords(conversion.simklBackup);
   const notes = [...conversion.notes];
+
+  if (config.tvTimeOutZipBuffer) {
+    try {
+      const external = parseTvTimeOutZip(config.tvTimeOutZipBuffer);
+      const applied = applyTvTimeOutMappings(records, external.mappings);
+      external.stats.applied = applied;
+      notes.push(`${applied} records were prefilled with IMDb/TVDB IDs from TV Time Out by Refract.`);
+      if (external.stats.conflicts) {
+        notes.push(`${external.stats.conflicts} TV Time Out ID mappings were ignored because they had conflicting IDs.`);
+      }
+    } catch (error) {
+      notes.push(`TV Time Out ZIP ignored: ${error.message}`);
+    }
+  }
 
   if (config.mappingStore) {
     try {
@@ -116,16 +131,27 @@ async function enrichRecords(records, options) {
     }
 
     progress({
-      phase: record.inputSimklId ? `confirming SIMKL type: ${record.title}` : `searching SIMKL: ${record.title}`,
+      phase: record.inputSimklId || record.inputImdbId || record.inputTvdbId
+        ? `validating known IDs: ${record.title}`
+        : `searching SIMKL: ${record.title}`,
       done: index,
       total,
     });
 
     try {
-      const result = record.inputSimklId
-        ? await client.lookupById(record.inputSimklId, validationTypes(record, record.simklType), record)
+      const result = record.inputSimklId || record.inputImdbId || record.inputTvdbId
+        ? await validateRecordIds(client, record, {
+          simklId: record.inputSimklId,
+          imdbId: record.inputImdbId,
+          tvdbId: record.inputTvdbId,
+          type: record.simklType,
+        })
         : await client.enrichMediaRecord(record);
-      applyLookupResult(record, result);
+      applyLookupResult(record, result, {
+        keepInput: record.inputSimklId,
+        keepImdbId: record.inputImdbId,
+        keepTvdbId: record.inputTvdbId,
+      });
       await persistFoundMapping(record, mappingStore, progress, index, total);
     } catch (error) {
       markNotFound(record, 'simkl_api_error', error.message);
@@ -167,22 +193,27 @@ async function validateManualRecords(session, updates, options) {
     currentIndex = index;
 
     const typedId = cleanId(update.simklId);
+    const imdbId = cleanImdbId(update.imdbId);
+    const tvdbId = cleanId(update.tvdbId);
     const type = normalizeRecordType(update.simklType || record.simklType || record.sourceType);
 
     progress({
-      phase: typedId ? `validating ${typedId}` : `clearing ID for ${record.title}`,
+      phase: typedId || imdbId || tvdbId ? `validating IDs for ${record.title}` : `clearing IDs for ${record.title}`,
       done: index,
       total,
     });
 
     record.inputSimklId = typedId;
+    record.inputImdbId = imdbId;
+    record.inputTvdbId = tvdbId;
     record.simklType = type;
+    record.fieldErrors = {};
 
-    if (!typedId) {
+    if (!typedId && !imdbId && !tvdbId) {
       markNotFound(record, 'manual_id_removed');
       changed.push(toPublicRecord(record));
       progress({
-        phase: `ID cleared: ${record.title}`,
+        phase: `IDs cleared: ${record.title}`,
         done: index + 1,
         total,
       });
@@ -190,12 +221,24 @@ async function validateManualRecords(session, updates, options) {
     }
 
     try {
-      const result = await client.lookupById(typedId, validationTypes(record, type), record);
-      applyLookupResult(record, result, { manual: true, keepInput: typedId });
+      const result = await validateRecordIds(client, record, {
+        simklId: typedId,
+        imdbId,
+        tvdbId,
+        type,
+      });
+      applyLookupResult(record, result, {
+        manual: true,
+        keepInput: typedId,
+        keepImdbId: imdbId,
+        keepTvdbId: tvdbId,
+      });
       await persistFoundMapping(record, mappingStore, progress, index, total);
     } catch (error) {
       markNotFound(record, 'simkl_api_error', error.message);
       record.inputSimklId = typedId;
+      record.inputImdbId = imdbId;
+      record.inputTvdbId = tvdbId;
     }
 
     changed.push(toPublicRecord(record));
@@ -207,6 +250,55 @@ async function validateManualRecords(session, updates, options) {
   }
 
   return changed;
+}
+
+async function validateRecordIds(client, record, ids) {
+  let result = null;
+  if (ids.simklId) {
+    result = await client.lookupById(ids.simklId, validationTypes(record, ids.type), record);
+    if (result && result.status === 'found') {
+      const fieldErrors = compareExternalIds(ids, result);
+      if (Object.keys(fieldErrors).length) {
+        return {
+          status: 'not_found',
+          reason: 'id_mismatch',
+          fieldErrors,
+        };
+      }
+      return result;
+    }
+  }
+
+  if (ids.imdbId || ids.tvdbId) {
+    result = await client.lookupByExternalIds({
+      imdbId: ids.imdbId,
+      tvdbId: ids.tvdbId,
+    }, validationTypes(record, ids.type), record);
+    if (result && result.status === 'found') {
+      const fieldErrors = compareExternalIds(ids, result);
+      if (Object.keys(fieldErrors).length) {
+        return {
+          status: 'not_found',
+          reason: 'id_mismatch',
+          fieldErrors,
+        };
+      }
+    }
+    return result;
+  }
+
+  return { status: 'not_found', reason: 'no_ids' };
+}
+
+function compareExternalIds(input, result) {
+  const errors = {};
+  if (input.imdbId && result.imdbId && cleanImdbId(input.imdbId) !== cleanImdbId(result.imdbId)) {
+    errors.imdbId = 'IMDb ID does not match the SIMKL item.';
+  }
+  if (input.tvdbId && result.tvdbId && cleanId(input.tvdbId) !== cleanId(result.tvdbId)) {
+    errors.tvdbId = 'TVDB ID does not match the SIMKL item.';
+  }
+  return errors;
 }
 
 async function applyStoredMappings(records, mappingStore) {
@@ -227,6 +319,7 @@ async function applyStoredMappings(records, mappingStore) {
     ) {
       record.inputSimklId = String(mapping.simkl.id);
       record.initialSimklId = String(mapping.simkl.id);
+      applyStoredExternalIds(record, mapping);
       record.lookupSource = 'mongodb_untyped';
       record.reason = 'mongodb_id_needs_type';
       needsType += 1;
@@ -245,10 +338,51 @@ async function applyStoredMappings(records, mappingStore) {
       typeVerifiedBy: mapping.simkl.typeVerifiedBy || 'mongodb',
       candidates: [],
     });
+    applyStoredExternalIds(record, mapping);
     cached += 1;
   }
 
   return { cached, needsType };
+}
+
+function applyStoredExternalIds(record, mapping) {
+  const ids = mapping.ids || {};
+  if (ids.imdb) {
+    record.inputImdbId = String(ids.imdb).toLowerCase();
+    record.initialImdbId = record.inputImdbId;
+    record.verifiedImdbId = record.inputImdbId;
+  }
+  if (ids.tvdb) {
+    record.inputTvdbId = String(ids.tvdb);
+    record.initialTvdbId = record.inputTvdbId;
+    record.verifiedTvdbId = record.inputTvdbId;
+  }
+}
+
+function applyTvTimeOutMappings(records, mappings) {
+  if (!mappings || !mappings.size) {
+    return 0;
+  }
+
+  let applied = 0;
+  for (const record of records) {
+    const key = mappingKey(record.sourceType === 'movie' ? 'movie' : 'show', record.title, record.year);
+    const mapping = mappings.get(key);
+    if (!mapping) continue;
+
+    if (mapping.imdbId) {
+      record.inputImdbId = mapping.imdbId;
+      record.initialImdbId = mapping.imdbId;
+      record.lookupSource = record.lookupSource || 'tv_time_out';
+    }
+    if (mapping.tvdbId) {
+      record.inputTvdbId = mapping.tvdbId;
+      record.initialTvdbId = mapping.tvdbId;
+      record.lookupSource = record.lookupSource || 'tv_time_out';
+    }
+    applied += 1;
+  }
+  return applied;
 }
 
 async function saveConfirmedMappings(session, submittedRecords, mappingStore) {
@@ -276,6 +410,8 @@ function collectConfirmedMappings(session, submittedRecords) {
     const update = submitted.get(record.id);
     const rawId = update ? String(update.simklId || '').trim() : record.inputSimklId;
     const simklId = cleanId(rawId);
+    const imdbId = cleanImdbId(update ? update.imdbId : record.inputImdbId);
+    const tvdbId = cleanId(update ? update.tvdbId : record.inputTvdbId);
     const simklType = normalizeRecordType((update && update.simklType) || record.simklType || record.sourceType);
 
     if (!rawId) {
@@ -297,6 +433,10 @@ function collectConfirmedMappings(session, submittedRecords) {
     const mapping = mappingFromRecord(record);
     rows.push({
       ...mapping,
+      ids: {
+        imdb: imdbId || mapping.ids.imdb || '',
+        tvdb: tvdbId ? Number.parseInt(tvdbId, 10) : mapping.ids.tvdb || null,
+      },
       simkl: {
         ...mapping.simkl,
         id: Number.parseInt(simklId, 10),
@@ -315,6 +455,12 @@ function mappingFromRecord(record) {
     title: record.title,
     normalizedTitle: normalizeTitle(record.title),
     year: record.year || null,
+    ids: {
+      imdb: cleanImdbId(record.verifiedImdbId || record.inputImdbId),
+      tvdb: cleanId(record.verifiedTvdbId || record.inputTvdbId)
+        ? Number.parseInt(cleanId(record.verifiedTvdbId || record.inputTvdbId), 10)
+        : null,
+    },
     simkl: {
       id: Number.parseInt(cleanId(record.verifiedSimklId || record.inputSimklId), 10),
       type: normalizeRecordType(record.simklType),
@@ -365,6 +511,8 @@ function buildDownload(session, submittedRecords, options) {
     return {
       ...record,
       inputSimklId: cleanId(update.simklId),
+      inputImdbId: cleanImdbId(update.imdbId),
+      inputTvdbId: cleanId(update.tvdbId),
       simklType: normalizeRecordType(update.simklType || record.simklType),
     };
   });
@@ -413,8 +561,14 @@ function addEntries(map, entries, listName, sourceType) {
         watchedEpisodes: 0,
         rewatchEntries: 0,
         inputSimklId: '',
+        inputImdbId: '',
+        inputTvdbId: '',
         initialSimklId: '',
+        initialImdbId: '',
+        initialTvdbId: '',
         verifiedSimklId: '',
+        verifiedImdbId: '',
+        verifiedTvdbId: '',
         simklType: sourceType === 'movie' ? 'movie' : sourceType === 'anime' ? 'anime' : 'tv',
         simklTitle: '',
         simklYear: null,
@@ -424,6 +578,7 @@ function addEntries(map, entries, listName, sourceType) {
         status: 'not_found',
         reason: 'not_checked',
         error: '',
+        fieldErrors: {},
         candidates: [],
       };
       map.set(key, record);
@@ -523,17 +678,29 @@ function applySimklId(entry, record, simklId) {
 function applyLookupResult(record, result, options) {
   const config = options || {};
   if (!result || result.status !== 'found' || !result.simklId) {
-    markNotFound(record, result && result.reason ? result.reason : 'not_found');
+    markNotFound(record, result && result.reason ? result.reason : 'not_found', '', result && result.fieldErrors);
     if (config.keepInput) {
       record.inputSimklId = config.keepInput;
+    }
+    if (config.keepImdbId) {
+      record.inputImdbId = config.keepImdbId;
+    }
+    if (config.keepTvdbId) {
+      record.inputTvdbId = config.keepTvdbId;
     }
     return;
   }
 
   const id = String(result.simklId);
   record.inputSimklId = config.keepInput || id;
+  record.inputImdbId = config.keepImdbId || cleanImdbId(result.imdbId) || record.inputImdbId || '';
+  record.inputTvdbId = config.keepTvdbId || cleanId(result.tvdbId) || record.inputTvdbId || '';
   record.verifiedSimklId = id;
+  record.verifiedImdbId = cleanImdbId(result.imdbId) || record.inputImdbId || '';
+  record.verifiedTvdbId = cleanId(result.tvdbId) || record.inputTvdbId || '';
   record.initialSimklId = record.initialSimklId || id;
+  record.initialImdbId = record.initialImdbId || record.inputImdbId || '';
+  record.initialTvdbId = record.initialTvdbId || record.inputTvdbId || '';
   record.simklType = normalizeRecordType(result.simklType || record.simklType);
   record.simklTitle = result.title || record.simklTitle || '';
   record.simklYear = result.year || null;
@@ -544,11 +711,14 @@ function applyLookupResult(record, result, options) {
   record.status = 'found';
   record.reason = '';
   record.error = '';
+  record.fieldErrors = {};
   record.candidates = result.candidates || [];
 }
 
-function markNotFound(record, reason, error) {
+function markNotFound(record, reason, error, fieldErrors) {
   record.verifiedSimklId = '';
+  record.verifiedImdbId = '';
+  record.verifiedTvdbId = '';
   record.simklTitle = '';
   record.simklYear = null;
   record.confidence = null;
@@ -558,6 +728,7 @@ function markNotFound(record, reason, error) {
   record.status = 'not_found';
   record.reason = reason || 'not_found';
   record.error = error || '';
+  record.fieldErrors = fieldErrors || {};
   record.candidates = record.candidates || [];
 }
 
@@ -598,8 +769,14 @@ function toPublicRecord(record) {
     watchedEpisodes: record.watchedEpisodes,
     rewatchEntries: record.rewatchEntries,
     inputSimklId: record.inputSimklId,
+    inputImdbId: record.inputImdbId,
+    inputTvdbId: record.inputTvdbId,
     initialSimklId: record.initialSimklId,
+    initialImdbId: record.initialImdbId,
+    initialTvdbId: record.initialTvdbId,
     verifiedSimklId: record.verifiedSimklId,
+    verifiedImdbId: record.verifiedImdbId,
+    verifiedTvdbId: record.verifiedTvdbId,
     simklType: record.simklType,
     simklTitle: record.simklTitle,
     simklYear: record.simklYear,
@@ -610,6 +787,7 @@ function toPublicRecord(record) {
     status: record.status,
     reason: record.reason,
     error: record.error,
+    fieldErrors: record.fieldErrors || {},
     candidates: (record.candidates || []).slice(0, 3),
   };
 }
@@ -652,6 +830,11 @@ function countEntryEpisodes(entry) {
 function cleanId(value) {
   const text = String(value || '').trim();
   return /^\d+$/.test(text) ? text : '';
+}
+
+function cleanImdbId(value) {
+  const text = String(value || '').trim().toLowerCase();
+  return /^tt\d{5,12}$/.test(text) ? text : '';
 }
 
 function retryPhase(retry, record) {

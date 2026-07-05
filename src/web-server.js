@@ -84,6 +84,7 @@ async function createJob(request, response) {
   if (!zip || !zip.data || !zip.data.length) {
     throw new Error('Upload the .zip file exported by TV Time.');
   }
+  const tvTimeOutZip = parsed.files.tvTimeOutZip;
 
   const clientId = String(process.env.SIMKL_CLIENT_ID || '').trim();
   if (!clientId) {
@@ -101,6 +102,7 @@ async function createJob(request, response) {
   setImmediate(() => {
     processJob(job, zip.data, {
       clientId,
+      tvTimeOutZipBuffer: tvTimeOutZip && tvTimeOutZip.data && tvTimeOutZip.data.length ? tvTimeOutZip.data : null,
       includePlanToWatch: parsed.fields.includePlanToWatch !== 'false',
       includeRewatches: parsed.fields.includeRewatches !== 'false',
     }).catch((error) => {

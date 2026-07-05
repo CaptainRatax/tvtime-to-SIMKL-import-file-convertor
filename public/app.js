@@ -168,8 +168,10 @@ function saveSessionDraft() {
     const draft = state.records.map((record) => ({
       id: record.id,
       currentId: record.currentId || '',
+      currentImdbId: record.currentImdbId || '',
+      currentTvdbId: record.currentTvdbId || '',
       currentType: record.currentType || defaultType(record),
-      imdbWarning: record.imdbWarning || '',
+      fieldWarnings: record.fieldWarnings || {},
     }));
     localStorage.setItem(`sessionDraft:${state.sessionId}`, JSON.stringify(draft));
   } catch {
@@ -187,8 +189,10 @@ function applySessionDraft(sessionId) {
       const saved = draft.get(record.id);
       if (!saved) continue;
       record.currentId = cleanId(saved.currentId) || '';
+      record.currentImdbId = cleanImdbId(saved.currentImdbId) || '';
+      record.currentTvdbId = cleanId(saved.currentTvdbId) || '';
       record.currentType = saved.currentType || record.currentType;
-      record.imdbWarning = saved.imdbWarning || '';
+      record.fieldWarnings = saved.fieldWarnings || {};
     }
   } catch {
     // Ignore invalid/old draft data.
@@ -202,12 +206,28 @@ elements.recordsBody.addEventListener('input', (event) => {
   if (!record) return;
 
   if (event.target.classList.contains('simkl-id')) {
-    const parsed = parseIdInput(event.target.value);
-    record.imdbWarning = parsed.imdbId;
+    const parsed = parseNumericIdInput(event.target.value, 'SIMKL');
+    clearStaleFieldErrors(record);
+    record.fieldWarnings = { ...(record.fieldWarnings || {}), simklId: parsed.warning };
     record.currentId = parsed.simklId;
     event.target.value = parsed.simklId;
   }
+  if (event.target.classList.contains('imdb-id')) {
+    const parsed = parseImdbIdInput(event.target.value);
+    clearStaleFieldErrors(record);
+    record.fieldWarnings = { ...(record.fieldWarnings || {}), imdbId: parsed.warning };
+    record.currentImdbId = parsed.imdbId;
+    event.target.value = parsed.imdbId || event.target.value.trim();
+  }
+  if (event.target.classList.contains('tvdb-id')) {
+    const parsed = parseNumericIdInput(event.target.value, 'TVDB');
+    clearStaleFieldErrors(record);
+    record.fieldWarnings = { ...(record.fieldWarnings || {}), tvdbId: parsed.warning };
+    record.currentTvdbId = parsed.simklId;
+    event.target.value = parsed.simklId;
+  }
   if (event.target.classList.contains('type-select')) {
+    clearStaleFieldErrors(record);
     record.currentType = event.target.value;
   }
 
@@ -218,24 +238,37 @@ elements.recordsBody.addEventListener('input', (event) => {
 
 elements.recordsBody.addEventListener('paste', (event) => {
   const input = event.target.closest('.simkl-id');
-  if (!input) return;
+  const tvdbInput = event.target.closest('.tvdb-id');
+  const imdbInput = event.target.closest('.imdb-id');
+  if (!input && !tvdbInput && !imdbInput) return;
 
-  const row = input.closest('tr[data-id]');
+  const row = event.target.closest('tr[data-id]');
   const record = state.records.find((item) => item.id === row.dataset.id);
   if (!record) return;
 
   const pasted = event.clipboardData ? event.clipboardData.getData('text') : '';
-  const parsed = parseIdInput(pasted);
+  if (imdbInput) return;
+
+  const parsed = parseNumericIdInput(pasted, input ? 'SIMKL' : 'TVDB');
   if (!parsed.imdbId) return;
 
   event.preventDefault();
-  record.imdbWarning = parsed.imdbId;
-  record.currentId = '';
-  input.value = '';
+  clearStaleFieldErrors(record);
+  record.fieldWarnings = {
+    ...(record.fieldWarnings || {}),
+    [input ? 'simklId' : 'tvdbId']: `${parsed.imdbId} is an IMDb ID, not a ${input ? 'SIMKL' : 'TVDB'} ID.`,
+  };
+  if (input) {
+    record.currentId = '';
+    input.value = '';
+  } else {
+    record.currentTvdbId = '';
+    tvdbInput.value = '';
+  }
   updateRowState(row, record);
   saveSessionDraft();
   renderSummary();
-  showToast(`${parsed.imdbId} is an IMDb ID, not a SIMKL ID.`);
+  showToast(`${parsed.imdbId} is an IMDb ID, not a ${input ? 'SIMKL' : 'TVDB'} ID.`);
 });
 
 async function onUpload(event) {
@@ -377,8 +410,10 @@ function loadSession(session) {
   state.records = session.records.map((record) => ({
     ...record,
     currentId: record.inputSimklId || '',
+    currentImdbId: record.inputImdbId || '',
+    currentTvdbId: record.inputTvdbId || '',
     currentType: record.simklType || defaultType(record),
-    imdbWarning: '',
+    fieldWarnings: record.fieldErrors || {},
   }));
   applySessionDraft(session.id);
 
@@ -539,9 +574,23 @@ function renderRecordRow(record) {
         <div class="simkl-id-wrap">
           <input class="simkl-id" inputmode="numeric" pattern="[0-9]*" value="${escapeAttr(record.currentId || '')}">
         </div>
-        <span class="id-warning-line hidden">
+        <span class="id-warning-line hidden" data-field-warning="simklId">
           <span class="id-warning-text"></span>
           <span class="id-warning" title="This is an IMDb ID, not a SIMKL ID. Paste it into SIMKL search to open the matching page, then copy the numeric SIMKL ID from the SIMKL URL.">!</span>
+        </span>
+      </td>
+      <td>
+        <input class="imdb-id" inputmode="text" value="${escapeAttr(record.currentImdbId || '')}" placeholder="tt...">
+        <span class="id-warning-line hidden" data-field-warning="imdbId">
+          <span class="id-warning-text"></span>
+          <span class="id-warning" title="IMDb IDs must start with tt followed by numbers, for example tt0133093.">!</span>
+        </span>
+      </td>
+      <td>
+        <input class="tvdb-id" inputmode="numeric" pattern="[0-9]*" value="${escapeAttr(record.currentTvdbId || '')}">
+        <span class="id-warning-line hidden" data-field-warning="tvdbId">
+          <span class="id-warning-text"></span>
+          <span class="id-warning" title="TVDB IDs are numeric. Do not paste an IMDb ID here.">!</span>
         </span>
       </td>
       <td class="simkl-name">
@@ -562,17 +611,28 @@ function updateRowState(row, record) {
     pill.textContent = status === 'found' ? 'Found' : status === 'pending' ? 'Changed' : 'No match';
   }
 
-  const warningLine = row.querySelector('.id-warning-line');
-  const warningText = row.querySelector('.id-warning-text');
-  if (warningLine && warningText) {
-    const hasWarning = Boolean(record.imdbWarning);
+  const warnings = {
+    ...(record.fieldErrors || {}),
+    ...(record.fieldWarnings || {}),
+  };
+  for (const warningLine of row.querySelectorAll('[data-field-warning]')) {
+    const field = warningLine.dataset.fieldWarning;
+    const warningText = warningLine.querySelector('.id-warning-text');
+    const warningIcon = warningLine.querySelector('.id-warning');
+    const message = warnings[field] || '';
+    const hasWarning = Boolean(message);
     warningLine.classList.toggle('hidden', !hasWarning);
-    warningText.textContent = hasWarning ? `${record.imdbWarning} is IMDb, not SIMKL` : '';
+    if (warningText) {
+      warningText.textContent = message;
+    }
+    if (warningIcon) {
+      warningIcon.title = hasWarning ? message : defaultFieldWarningTooltip(field);
+    }
   }
 }
 
 async function validatePending() {
-  const pending = state.records.filter((record) => visualStatus(record) === 'pending' && cleanId(record.currentId));
+  const pending = state.records.filter((record) => visualStatus(record) === 'pending' && hasAnyCleanRecordId(record));
   if (!pending.length) {
     showToast('There are no changed IDs to validate.');
     return;
@@ -595,6 +655,8 @@ async function validatePending() {
         records: pending.map((record) => ({
           id: record.id,
           simklId: record.currentId,
+          imdbId: record.currentImdbId,
+          tvdbId: record.currentTvdbId,
           simklType: record.currentType,
         })),
       }),
@@ -684,6 +746,8 @@ async function requestDownload() {
         records: state.records.map((record) => ({
           id: record.id,
           simklId: record.currentId,
+          imdbId: record.currentImdbId,
+          tvdbId: record.currentTvdbId,
           simklType: record.currentType,
         })),
         exportOptions: state.exportOptions,
@@ -745,6 +809,8 @@ async function saveConfirmedIds(options) {
         records: state.records.map((record) => ({
           id: record.id,
           simklId: cleanId(record.currentId),
+          imdbId: cleanImdbId(record.currentImdbId),
+          tvdbId: cleanId(record.currentTvdbId),
           simklType: record.currentType,
         })),
       }),
@@ -772,8 +838,10 @@ function mergeRecords(records) {
     if (!record) continue;
     Object.assign(record, update);
     record.currentId = update.inputSimklId || '';
+    record.currentImdbId = update.inputImdbId || '';
+    record.currentTvdbId = update.inputTvdbId || '';
     record.currentType = update.simklType || defaultType(update);
-    record.imdbWarning = '';
+    record.fieldWarnings = {};
   }
 }
 
@@ -786,6 +854,8 @@ function filteredRecords() {
       record.title,
       record.year,
       record.currentId,
+      record.currentImdbId,
+      record.currentTvdbId,
       record.simklTitle,
       record.simklType,
       record.sourceType,
@@ -796,11 +866,21 @@ function filteredRecords() {
 
 function visualStatus(record) {
   const currentId = cleanId(record.currentId);
-  if (!currentId) return 'not_found';
+  const currentImdbId = cleanImdbId(record.currentImdbId);
+  const currentTvdbId = cleanId(record.currentTvdbId);
+  if (hasFieldWarnings(record)) return 'not_found';
+  if (!currentId && !currentImdbId && !currentTvdbId) return 'not_found';
 
   const baselineId = cleanId(record.inputSimklId);
+  const baselineImdbId = cleanImdbId(record.inputImdbId);
+  const baselineTvdbId = cleanId(record.inputTvdbId);
   const baselineType = record.simklType || defaultType(record);
-  if (currentId !== baselineId || record.currentType !== baselineType) {
+  if (
+    currentId !== baselineId ||
+    currentImdbId !== baselineImdbId ||
+    currentTvdbId !== baselineTvdbId ||
+    record.currentType !== baselineType
+  ) {
     return 'pending';
   }
 
@@ -809,6 +889,33 @@ function visualStatus(record) {
   }
 
   return 'not_found';
+}
+
+function hasFieldWarnings(record) {
+  return Object.values(record.fieldWarnings || {}).some(Boolean) ||
+    Object.values(record.fieldErrors || {}).some(Boolean);
+}
+
+function defaultFieldWarningTooltip(field) {
+  if (field === 'imdbId') {
+    return 'IMDb IDs must start with tt followed by numbers, for example tt0133093.';
+  }
+  if (field === 'tvdbId') {
+    return 'TVDB IDs are numeric. Do not paste an IMDb ID here.';
+  }
+  return 'This is an IMDb ID, not a SIMKL ID. Paste it into SIMKL search to open the matching page, then copy the numeric SIMKL ID from the SIMKL URL.';
+}
+
+function clearStaleFieldErrors(record) {
+  record.fieldErrors = {};
+}
+
+function hasAnyCleanRecordId(record) {
+  return Boolean(
+    cleanId(record.currentId) ||
+    cleanImdbId(record.currentImdbId) ||
+    cleanId(record.currentTvdbId)
+  );
 }
 
 function countVisualStates() {
@@ -837,8 +944,12 @@ function getSaveState() {
   let empty = 0;
 
   for (const record of state.records) {
-    const rawId = String(record.currentId || '').trim();
-    if (!rawId) {
+    const hasAnyId = Boolean(
+      String(record.currentId || '').trim() ||
+      String(record.currentImdbId || '').trim() ||
+      String(record.currentTvdbId || '').trim()
+    );
+    if (!hasAnyId) {
       empty += 1;
       continue;
     }
@@ -955,20 +1066,42 @@ function cleanId(value) {
   return /^\d+$/.test(text) ? text : '';
 }
 
-function parseIdInput(value) {
+function cleanImdbId(value) {
+  const text = String(value || '').trim().toLowerCase();
+  return /^tt\d{5,12}$/.test(text) ? text : '';
+}
+
+function parseNumericIdInput(value, label) {
   const text = String(value || '').trim();
   const imdbMatch = text.match(/\btt\d{5,12}\b/i);
   if (imdbMatch) {
     return {
       simklId: '',
       imdbId: imdbMatch[0].toLowerCase(),
+      warning: `${imdbMatch[0].toLowerCase()} is an IMDb ID, not a ${label} ID.`,
     };
   }
 
   return {
     simklId: text.replace(/\D/g, ''),
     imdbId: '',
+    warning: '',
   };
+}
+
+function parseImdbIdInput(value) {
+  const text = String(value || '').trim().toLowerCase();
+  if (!text) {
+    return { imdbId: '', warning: '' };
+  }
+  const imdbId = cleanImdbId(text);
+  if (!imdbId) {
+    return {
+      imdbId: text,
+      warning: 'IMDb IDs must start with tt followed by numbers.',
+    };
+  }
+  return { imdbId, warning: '' };
 }
 
 function filenameFromResponse(response) {

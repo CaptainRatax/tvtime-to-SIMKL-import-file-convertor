@@ -182,6 +182,8 @@ class SimklClient {
             simklType: resolvedType,
             title: getTitle(item),
             year: getYear(item) || null,
+            imdbId: getImdbId(item),
+            tvdbId: getTvdbId(item),
             confidence: contextRecord ? Math.min(100, Math.max(70, Math.round(scoreCandidate(contextRecord, item, resolvedType)))) : 100,
             url: item.url || item.simkl_url || '',
             typeVerified: true,
@@ -198,6 +200,85 @@ class SimklClient {
     }
 
     return { status: 'not_found', reason: 'id_not_found' };
+  }
+
+  async lookupByExternalIds(ids, preferredTypes, contextRecord) {
+    const imdbId = cleanImdbId(ids && ids.imdbId);
+    const tvdbId = cleanNumericId(ids && ids.tvdbId);
+    const lookups = [];
+
+    if (imdbId) {
+      lookups.push(await this.lookupByExternalId('imdb', imdbId, preferredTypes, contextRecord));
+    }
+    if (tvdbId) {
+      lookups.push(await this.lookupByExternalId('tvdb', tvdbId, preferredTypes, contextRecord));
+    }
+
+    const found = lookups.filter((lookup) => lookup && lookup.status === 'found' && lookup.simklId);
+    if (!found.length) {
+      return { status: 'not_found', reason: 'external_ids_not_found' };
+    }
+
+    const first = found[0];
+    const mismatch = found.find((lookup) => String(lookup.simklId) !== String(first.simklId));
+    if (mismatch) {
+      return {
+        status: 'not_found',
+        reason: 'external_ids_mismatch',
+        fieldErrors: {
+          imdbId: imdbId ? 'IMDb ID points to a different SIMKL item.' : '',
+          tvdbId: tvdbId ? 'TVDB ID points to a different SIMKL item.' : '',
+        },
+      };
+    }
+
+    return {
+      ...first,
+      source: found.length > 1 ? 'external_ids' : first.source,
+    };
+  }
+
+  async lookupByExternalId(kind, value, preferredTypes, contextRecord) {
+    const params = {};
+    params[kind] = value;
+
+    const response = await this.request('/search/id', params);
+    const candidates = extractSearchIdCandidates(response)
+      .filter((candidate) => candidate.simklId)
+      .sort((left, right) => {
+        const typeScore = Number((preferredTypes || []).includes(right.simklType)) - Number((preferredTypes || []).includes(left.simklType));
+        return typeScore || right.score - left.score;
+      });
+
+    const best = candidates[0];
+    if (!best) {
+      return { status: 'not_found', reason: `${kind}_not_found` };
+    }
+
+    const canonical = await this.lookupById(best.simklId, [best.simklType], contextRecord).catch(() => null);
+    if (canonical && canonical.status === 'found') {
+      return {
+        ...canonical,
+        source: kind,
+        confidence: contextRecord ? canonical.confidence : 100,
+        candidates: candidates.slice(0, 5),
+      };
+    }
+
+    return {
+      status: 'found',
+      source: kind,
+      simklId: best.simklId,
+      simklType: best.simklType,
+      title: best.title,
+      year: best.year,
+      imdbId: best.imdbId || (kind === 'imdb' ? value : ''),
+      tvdbId: best.tvdbId || (kind === 'tvdb' ? value : ''),
+      confidence: 100,
+      candidates: candidates.slice(0, 5),
+      typeVerified: true,
+      typeVerifiedBy: 'search_id',
+    };
   }
 
   async request(pathname, params, options) {
@@ -415,6 +496,58 @@ function getSimklId(item) {
   return Number.isInteger(id) && id > 0 ? id : null;
 }
 
+function getImdbId(item) {
+  const ids = (item && item.ids) || {};
+  return cleanImdbId(ids.imdb || ids.imdb_id || item.imdb_id || item.imdb);
+}
+
+function getTvdbId(item) {
+  const ids = (item && item.ids) || {};
+  return cleanNumericId(ids.tvdb || ids.tvdb_id || item.tvdb_id || item.tvdb);
+}
+
+function extractSearchIdCandidates(response) {
+  const candidates = [];
+  const seen = new Set();
+
+  visitSearchId(response, (item, fallbackType) => {
+    const simklId = getSimklId(item);
+    if (!simklId || seen.has(simklId)) return;
+    seen.add(simklId);
+    const simklType = getItemSimklType(item, fallbackType || 'tv');
+    candidates.push({
+      simklId,
+      simklType,
+      title: getTitle(item),
+      year: getYear(item) || null,
+      imdbId: getImdbId(item),
+      tvdbId: getTvdbId(item),
+      score: 100,
+    });
+  });
+
+  return candidates;
+}
+
+function visitSearchId(value, callback, keyHint) {
+  if (!value || typeof value !== 'object') return;
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      visitSearchId(item, callback, keyHint);
+    }
+    return;
+  }
+
+  if (getSimklId(value)) {
+    callback(value, normalizeSimklType(keyHint || value.type || value.media_type || ''));
+  }
+
+  for (const [key, child] of Object.entries(value)) {
+    if (key === 'ids') continue;
+    visitSearchId(child, callback, key);
+  }
+}
+
 function getItemSimklType(item, fallbackType) {
   const value = item && (item.type || item.media_type || item.kind);
   if (!value) {
@@ -453,6 +586,16 @@ function normalizeTitle(value) {
     .replace(/\b(the|a|an)\b/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+function cleanNumericId(value) {
+  const text = String(value || '').trim();
+  return /^\d+$/.test(text) ? text : '';
+}
+
+function cleanImdbId(value) {
+  const text = String(value || '').trim().toLowerCase();
+  return /^tt\d{5,12}$/.test(text) ? text : '';
 }
 
 function unique(values) {

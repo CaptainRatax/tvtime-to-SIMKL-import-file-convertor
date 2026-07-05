@@ -1354,6 +1354,7 @@ module.exports = {
   renderReportCsv,
   renderReportMarkdown,
   printSummaryTable,
+  parseCsv,
   makeTimestamp,
   formatDuration,
   Progress,
