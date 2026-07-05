@@ -139,14 +139,7 @@ async function enrichRecords(records, options) {
     });
 
     try {
-      const result = record.inputSimklId || record.inputImdbId || record.inputTvdbId
-        ? await validateRecordIds(client, record, {
-          simklId: record.inputSimklId,
-          imdbId: record.inputImdbId,
-          tvdbId: record.inputTvdbId,
-          type: record.simklType,
-        })
-        : await client.enrichMediaRecord(record);
+      const result = await lookupRecordDuringUpload(client, record);
       applyLookupResult(record, result, {
         keepInput: record.inputSimklId,
         keepImdbId: record.inputImdbId,
@@ -159,6 +152,21 @@ async function enrichRecords(records, options) {
   }
 
   progress({ phase: 'SIMKL enrichment complete', done: total, total });
+}
+
+async function lookupRecordDuringUpload(client, record) {
+  const ids = {
+    simklId: record.inputSimklId,
+    imdbId: record.inputImdbId,
+    tvdbId: record.inputTvdbId,
+    type: record.simklType,
+  };
+
+  if (ids.simklId || ids.imdbId || ids.tvdbId) {
+    return validateRecordIds(client, record, ids);
+  }
+
+  return client.enrichMediaRecord(record);
 }
 
 async function validateManualRecords(session, updates, options) {
@@ -267,15 +275,13 @@ async function validateRecordIds(client, record, ids) {
       }
       return result;
     }
+    return result || { status: 'not_found', reason: 'simkl_id_not_found' };
   }
 
-  if (ids.imdbId || ids.tvdbId) {
-    result = await client.lookupByExternalIds({
-      imdbId: ids.imdbId,
-      tvdbId: ids.tvdbId,
-    }, validationTypes(record, ids.type), record);
+  if (ids.imdbId) {
+    result = await client.lookupByExternalId('imdb', ids.imdbId, validationTypes(record, ids.type), record);
     if (result && result.status === 'found') {
-      const fieldErrors = compareExternalIds(ids, result);
+      const fieldErrors = compareExternalIds({ imdbId: ids.imdbId }, result);
       if (Object.keys(fieldErrors).length) {
         return {
           status: 'not_found',
@@ -283,11 +289,26 @@ async function validateRecordIds(client, record, ids) {
           fieldErrors,
         };
       }
+      return result;
     }
-    return result;
   }
 
-  return { status: 'not_found', reason: 'no_ids' };
+  if (ids.tvdbId) {
+    result = await client.lookupByExternalId('tvdb', ids.tvdbId, validationTypes(record, ids.type), record);
+    if (result && result.status === 'found') {
+      const fieldErrors = compareExternalIds({ tvdbId: ids.tvdbId }, result);
+      if (Object.keys(fieldErrors).length) {
+        return {
+          status: 'not_found',
+          reason: 'id_mismatch',
+          fieldErrors,
+        };
+      }
+      return result;
+    }
+  }
+
+  return result || { status: 'not_found', reason: 'no_ids' };
 }
 
 function compareExternalIds(input, result) {

@@ -222,13 +222,25 @@ class SimklClient {
     const first = found[0];
     const mismatch = found.find((lookup) => String(lookup.simklId) !== String(first.simklId));
     if (mismatch) {
+      const fieldErrors = {};
+      for (const lookup of found) {
+        if (String(lookup.simklId) === String(first.simklId)) continue;
+        if (lookup.source === 'imdb') {
+          fieldErrors.imdbId = 'IMDb ID points to a different SIMKL item.';
+        }
+        if (lookup.source === 'tvdb') {
+          fieldErrors.tvdbId = 'TVDB ID points to a different SIMKL item.';
+        }
+      }
+      if (!Object.keys(fieldErrors).length) {
+        if (imdbId) fieldErrors.imdbId = 'IMDb ID points to a different SIMKL item.';
+        if (tvdbId) fieldErrors.tvdbId = 'TVDB ID points to a different SIMKL item.';
+      }
+
       return {
         status: 'not_found',
         reason: 'external_ids_mismatch',
-        fieldErrors: {
-          imdbId: imdbId ? 'IMDb ID points to a different SIMKL item.' : '',
-          tvdbId: tvdbId ? 'TVDB ID points to a different SIMKL item.' : '',
-        },
+        fieldErrors,
       };
     }
 
@@ -239,6 +251,73 @@ class SimklClient {
   }
 
   async lookupByExternalId(kind, value, preferredTypes, contextRecord) {
+    const redirected = await this.lookupExternalIdByRedirect(kind, value, preferredTypes, contextRecord);
+    if (redirected.status === 'found') {
+      return redirected;
+    }
+
+    return this.lookupExternalIdBySearch(kind, value, preferredTypes, contextRecord);
+  }
+
+  async lookupExternalIdByRedirect(kind, value, preferredTypes, contextRecord) {
+    const params = {};
+    params[kind] = value;
+    params.to = 'simkl';
+    const redirectType = redirectTypeForRecord(contextRecord);
+    if (redirectType) {
+      params.type = redirectType;
+    }
+
+    let response;
+    try {
+      response = await this.request('/redirect', params, { redirect: 'manual', json: false });
+    } catch (error) {
+      if (isRedirectNotFound(error)) {
+        return { status: 'not_found', reason: `${kind}_redirect_not_found` };
+      }
+      throw error;
+    }
+
+    const location = response.headers.get('location') || '';
+    const parsed = parseSimklLocation(location);
+    if (!parsed.id) {
+      return { status: 'not_found', reason: `${kind}_redirect_not_found` };
+    }
+
+    const detailTypes = unique([parsed.type, ...(preferredTypes || [])]);
+    const canonical = await this.lookupById(parsed.id, detailTypes, contextRecord).catch((error) => {
+      if (isNotFoundLike(error)) return null;
+      throw error;
+    });
+    if (canonical && canonical.status === 'found') {
+      return {
+        ...canonical,
+        source: kind,
+        confidence: contextRecord ? canonical.confidence : 100,
+        url: location || canonical.url,
+        typeVerified: true,
+        typeVerifiedBy: 'external_redirect',
+      };
+    }
+
+    return {
+      status: 'found',
+      source: kind,
+      simklId: parsed.id,
+      simklType: parsed.type || normalizeSimklType(redirectType),
+      title: '',
+      year: null,
+      imdbId: kind === 'imdb' ? value : '',
+      tvdbId: kind === 'tvdb' ? value : '',
+      confidence: 100,
+      candidates: [],
+      url: location,
+      typeVerified: true,
+      typeVerifiedBy: 'external_redirect',
+    };
+  }
+
+  async lookupExternalIdBySearch(kind, value, preferredTypes, contextRecord) {
     const params = {};
     params[kind] = value;
 
@@ -344,7 +423,9 @@ class SimklClient {
 
       if (!response.ok && !(config.redirect === 'manual' && response.status >= 300 && response.status < 400)) {
         const text = await response.text().catch(() => '');
-        throw new Error(`SIMKL ${response.status}: ${text.slice(0, 180)}`);
+        const error = new Error(`SIMKL ${response.status}: ${text.slice(0, 180)}`);
+        error.status = response.status;
+        throw error;
       }
 
       if (config.json === false) {
@@ -378,6 +459,14 @@ function fallbackTypes(sourceType) {
   if (sourceType === 'movie') return ['movie'];
   if (sourceType === 'anime') return ['anime', 'tv'];
   return ['tv', 'anime'];
+}
+
+function redirectTypeForRecord(record) {
+  const type = normalizeSimklType(record && (record.simklType || record.sourceType));
+  if (type === 'movie' || type === 'anime') {
+    return type;
+  }
+  return record ? 'show' : '';
 }
 
 function defaultDelayMs() {
@@ -611,7 +700,11 @@ function isNotFoundLike(error) {
 }
 
 function isRecoverableLookupError(error) {
-  return error && /400|404|not_found|empty|url_failed/i.test(error.message);
+  return error && /400|404|412|not_found|empty|url_failed/i.test(error.message);
+}
+
+function isRedirectNotFound(error) {
+  return error && (error.status === 404 || error.status === 412 || /404|412|not_found|empty/i.test(error.message));
 }
 
 module.exports = {
